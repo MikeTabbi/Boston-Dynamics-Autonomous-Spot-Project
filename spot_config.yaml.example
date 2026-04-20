@@ -1,0 +1,14 @@
+/**:
+  ros__parameters:
+    username: "admin"
+    password: "YOUR_PASSWORD_HERE"
+    hostname: "192.168.80.3"
+    auto_claim: True
+    auto_power_on: False
+    auto_stand: False
+    cmd_duration: 5.0
+    arm_cmd_duration: 1.0
+    preferred_odom_frame: "odom"
+    tf_root: "odom"
+    rgb_cameras: True
+    initialize_spot_cam: False

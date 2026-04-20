@@ -1,0 +1,24 @@
+slam_toolbox:
+  ros__parameters:
+    odom_frame: spot/odom
+    map_frame: map
+    base_frame: spot/body
+    scan_topic: /scan
+
+    use_scan_matching: true
+    max_laser_range: 10.0
+    minimum_range: 0.3
+    resolution: 0.05
+
+    minimum_travel_distance: 0.3
+    minimum_travel_heading: 0.3
+    map_update_interval: 10.0
+
+    mode: localization
+    map_file_name: /root/my_map
+    map_start_at_dock: false
+
+    transform_timeout: 0.5
+    scan_queue_size: 20
+    throttle_scans: 1
+    transform_publish_period: 0.05

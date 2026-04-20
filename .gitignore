@@ -1,0 +1,7 @@
+spot_config.yaml
+*.pgm
+*.posegraph
+*.data
+__pycache__/
+*.pyc
+debug_capture/

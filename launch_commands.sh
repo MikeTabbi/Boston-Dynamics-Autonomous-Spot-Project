@@ -54,16 +54,14 @@ ros2 run topic_tools relay /cmd_vel /spot/cmd_vel
 
 # ── TERMINAL 6-MAP ── Autonomous Mapper (PHASE 1) ──────────
 # Drives Spot to build the map. No Nav2 required.
-# Behavior: forward -> obstacle -> backup -> turn -> wall_follow (8s) ->
-#   sweep 75deg into room -> repeat.
-# wall_detect_dist=3.0 finds walls up to 3m away during turn.
-# sweep_deg=75 sends Spot diagonally across room after each wall segment
-#   giving slam_toolbox cross-room geometry for loop closure.
+# Motion strategy: drive-pause-wiggle
+#   drive 2.5s -> stop 1.0s -> wiggle ±15deg -> every 3 cycles: turn 90deg -> repeat
+#   obstacle: backup 2s -> turn 90deg -> continue
 # Map saves automatically: /root/my_map.pgm + .yaml + .posegraph
 docker exec -it spot_nav bash
 
 source ~/.bashrc
-python3 -u /root/auto_mapper.py --ros-args -p duration_sec:=600.0 -p forward_speed:=0.15 -p obstacle_distance:=0.75 -p forward_cone_deg:=20.0 -p min_obstacle_hits:=5 -p side_angle_deg:=35.0 -p side_window_deg:=8.0 -p wall_follow_sec:=8.0 -p backup_sec:=2.0 -p sweep_deg:=75.0 -p wall_detect_dist:=3.0 -p map_save_path:=/root/my_map
+python3 -u /root/auto_mapper.py --ros-args -p duration_sec:=600.0 -p forward_speed:=0.10 -p drive_sec:=2.5 -p pause_sec:=1.0 -p wiggle_deg:=15.0 -p wiggle_speed:=0.20 -p cycles_before_turn:=3 -p turn_deg:=90.0 -p obstacle_distance:=0.75 -p forward_cone_deg:=20.0 -p min_obstacle_hits:=5 -p backup_sec:=2.0 -p map_save_path:=/root/my_map
 # After this exits: stop Terminal 3-MAP, inspect map, then start Phase 2.
 
 # Copy map to Desktop to inspect:

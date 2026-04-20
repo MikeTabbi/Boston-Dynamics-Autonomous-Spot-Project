@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-auto_mapper.py -- Autonomous mapping behavior for Spot.
+auto_mapper.py -- SLAM-friendly autonomous mapping for Spot.
 
-State machine:
-  forward -> detect obstacle -> backup -> turn_to_acquire_wall -> wall_follow -> sweep -> forward
+Motion strategy: drive-pause-wiggle
+  1. Drive forward slowly for drive_sec seconds
+  2. Stop — let scan settle for pause_sec
+  3. Wiggle: rotate +wiggle_deg then back to 0, slowly
+     (gives slam_toolbox two viewpoints from the same position)
+  4. If obstacle detected: backup -> turn -> repeat
+  5. After N cycles without wall contact: larger heading change (sweep_deg)
+     to ensure room coverage
 
-The sweep state turns Spot away from the wall (into the room) after each
-wall-follow segment. This sends Spot diagonally across the room, giving
-slam_toolbox cross-room scan data and loop-closure opportunities.
+This is optimized for SLAM quality, not coverage speed.
+Slow movement + stationary scans + small viewpoint changes = good loop closure.
 
 Run with:
   python3 /root/auto_mapper.py --ros-args -p duration_sec:=600.0 ...
@@ -28,68 +33,76 @@ class AutoMapper(Node):
     def __init__(self):
         super().__init__("auto_mapper")
 
-        self.declare_parameter("duration_sec", 600.0)
-        self.declare_parameter("forward_speed", 0.15)
-        self.declare_parameter("wall_follow_speed", 0.12)
-        self.declare_parameter("backup_speed", 0.10)
-        self.declare_parameter("turn_speed", 0.30)
-        self.declare_parameter("max_turn_speed", 0.45)
+        # Timing
+        self.declare_parameter("duration_sec",   600.0)
+        self.declare_parameter("drive_sec",        2.5)  # forward segment length
+        self.declare_parameter("pause_sec",        1.0)  # stationary settle time
+        self.declare_parameter("backup_sec",       2.0)
+
+        # Speeds
+        self.declare_parameter("forward_speed",   0.10)  # slow for clean scans
+        self.declare_parameter("backup_speed",    0.10)
+        self.declare_parameter("turn_speed",      0.25)
+
+        # Obstacle detection
         self.declare_parameter("obstacle_distance", 0.75)
-        self.declare_parameter("forward_cone_deg", 20.0)
-        self.declare_parameter("min_obstacle_hits", 5)
-        self.declare_parameter("wall_follow_sec", 8.0)
-        self.declare_parameter("wall_target_dist", 0.65)
-        self.declare_parameter("wall_kp", 1.2)
-        self.declare_parameter("side_angle_deg", 75.0)
-        self.declare_parameter("side_window_deg", 12.0)
-        self.declare_parameter("front_window_deg", 20.0)
-        self.declare_parameter("backup_sec", 1.2)
-        self.declare_parameter("sweep_deg", 75.0)
-        self.declare_parameter("wall_detect_dist", 3.0)
+        self.declare_parameter("forward_cone_deg",  20.0)
+        self.declare_parameter("min_obstacle_hits",    5)
+
+        # Wiggle (viewpoint diversity while stationary)
+        self.declare_parameter("wiggle_deg",      15.0)  # rotate ±wiggle_deg while paused
+        self.declare_parameter("wiggle_speed",    0.20)  # rad/s during wiggle
+
+        # Heading change after N forward cycles without finding wall
+        self.declare_parameter("cycles_before_turn",   3)   # turn every N drive cycles
+        self.declare_parameter("turn_deg",            90.0)  # heading change amount
+
         self.declare_parameter("map_save_path", "/root/my_map")
 
-        self.duration       = float(self.get_parameter("duration_sec").value)
-        self.fwd_speed      = float(self.get_parameter("forward_speed").value)
-        self.wall_speed     = float(self.get_parameter("wall_follow_speed").value)
-        self.backup_speed   = float(self.get_parameter("backup_speed").value)
-        self.turn_speed     = float(self.get_parameter("turn_speed").value)
-        self.max_turn_speed = float(self.get_parameter("max_turn_speed").value)
-        self.obs_dist       = float(self.get_parameter("obstacle_distance").value)
-        self.forward_cone_deg  = float(self.get_parameter("forward_cone_deg").value)
-        self.min_obstacle_hits = int(self.get_parameter("min_obstacle_hits").value)
-        self.wall_follow_sec   = float(self.get_parameter("wall_follow_sec").value)
-        self.wall_target    = float(self.get_parameter("wall_target_dist").value)
-        self.wall_kp        = float(self.get_parameter("wall_kp").value)
-        self.side_angle_deg = float(self.get_parameter("side_angle_deg").value)
-        self.side_window_deg = float(self.get_parameter("side_window_deg").value)
-        self.front_window_deg = float(self.get_parameter("front_window_deg").value)
-        self.backup_sec     = float(self.get_parameter("backup_sec").value)
-        self.sweep_deg      = float(self.get_parameter("sweep_deg").value)
-        self.wall_detect_dist = float(self.get_parameter("wall_detect_dist").value)
-        self.map_path       = str(self.get_parameter("map_save_path").value)
+        # Read params
+        self.duration      = float(self.get_parameter("duration_sec").value)
+        self.drive_sec     = float(self.get_parameter("drive_sec").value)
+        self.pause_sec     = float(self.get_parameter("pause_sec").value)
+        self.backup_sec    = float(self.get_parameter("backup_sec").value)
+        self.fwd_speed     = float(self.get_parameter("forward_speed").value)
+        self.backup_speed  = float(self.get_parameter("backup_speed").value)
+        self.turn_speed    = float(self.get_parameter("turn_speed").value)
+        self.obs_dist      = float(self.get_parameter("obstacle_distance").value)
+        self.fwd_cone_deg  = float(self.get_parameter("forward_cone_deg").value)
+        self.min_hits      = int(self.get_parameter("min_obstacle_hits").value)
+        self.wiggle_deg    = float(self.get_parameter("wiggle_deg").value)
+        self.wiggle_speed  = float(self.get_parameter("wiggle_speed").value)
+        self.cycles_before_turn = int(self.get_parameter("cycles_before_turn").value)
+        self.turn_deg      = float(self.get_parameter("turn_deg").value)
+        self.map_path      = str(self.get_parameter("map_save_path").value)
 
-        # sweep_sec: time to rotate sweep_deg at turn_speed
-        self.sweep_sec = math.radians(self.sweep_deg) / self.turn_speed
+        # Derived
+        self.wiggle_sec = math.radians(self.wiggle_deg) / self.wiggle_speed
+        self.turn_sec   = math.radians(self.turn_deg)   / self.turn_speed
 
+        # State
         self.cmd_pub = self.create_publisher(Twist, "/spot/cmd_vel", 10)
         self.scan: LaserScan | None = None
         self.create_subscription(LaserScan, "/scan", self._scan_cb, 10)
 
-        self.start_time  = time.time()
-        self.state       = "forward"
-        self.state_start = time.time()
-        self.follow_side = -1.0   # +1 = left wall, -1 = right wall
-        self._saved      = False
+        self.start_time    = time.time()
+        self.state         = "drive"
+        self.state_start   = time.time()
+        self._saved        = False
+        self._drive_cycles = 0       # counts completed drive segments
+        self._wiggle_dir   = 1.0     # +1 = wiggle right first, -1 = left first
+        self._turn_dir     = 1.0     # alternates each forced turn
 
         self.create_timer(0.1, self.tick)
 
         self.get_logger().info(
             f"AutoMapper ready -- duration={self.duration:.0f}s  "
-            f"fwd={self.fwd_speed:.2f}m/s  obs_dist={self.obs_dist:.2f}m  "
-            f"wall_follow={self.wall_follow_sec:.0f}s  "
-            f"sweep={self.sweep_deg:.0f}deg ({self.sweep_sec:.1f}s)  "
+            f"fwd={self.fwd_speed:.2f}m/s  drive={self.drive_sec:.1f}s  "
+            f"pause={self.pause_sec:.1f}s  wiggle=±{self.wiggle_deg:.0f}deg  "
             f"map -> {self.map_path}"
         )
+
+    # ------------------------------------------------------------------ #
 
     def _scan_cb(self, msg: LaserScan):
         self.scan = msg
@@ -105,43 +118,33 @@ class AutoMapper(Node):
         self.state_start = time.time()
         self.get_logger().info(f"State -> {state}")
 
-    def _ranges_in_window_deg(self, center_deg: float, half_width_deg: float):
-        if self.scan is None:
-            return []
-        center = math.radians(center_deg)
-        half   = math.radians(half_width_deg)
-        vals   = []
-        angle  = self.scan.angle_min
-        for r in self.scan.ranges:
-            if abs(angle - center) <= half and math.isfinite(r):
-                vals.append(r)
-            angle += self.scan.angle_increment
-        return vals
-
-    def _median_range_deg(self, center_deg: float, half_width_deg: float) -> float:
-        vals = self._ranges_in_window_deg(center_deg, half_width_deg)
-        return median(vals) if vals else math.inf
-
-    def _front_distance(self) -> float:
-        return self._median_range_deg(0.0, self.front_window_deg)
-
-    def _side_distance(self, side: float) -> float:
-        center = self.side_angle_deg if side > 0 else -self.side_angle_deg
-        return self._median_range_deg(center, self.side_window_deg)
-
     def _obstacle_ahead(self) -> bool:
         if self.scan is None:
             return False
-        cone  = math.radians(self.forward_cone_deg)
+        cone  = math.radians(self.fwd_cone_deg)
         hits  = 0
         angle = self.scan.angle_min
         for r in self.scan.ranges:
             if -cone <= angle <= cone and math.isfinite(r) and r < self.obs_dist:
                 hits += 1
-                if hits >= self.min_obstacle_hits:
+                if hits >= self.min_hits:
                     return True
             angle += self.scan.angle_increment
         return False
+
+    def _front_median(self) -> float:
+        if self.scan is None:
+            return math.inf
+        cone  = math.radians(self.fwd_cone_deg)
+        vals  = []
+        angle = self.scan.angle_min
+        for r in self.scan.ranges:
+            if -cone <= angle <= cone and math.isfinite(r):
+                vals.append(r)
+            angle += self.scan.angle_increment
+        return median(vals) if vals else math.inf
+
+    # ------------------------------------------------------------------ #
 
     def tick(self):
         elapsed       = time.time() - self.start_time
@@ -151,7 +154,7 @@ class AutoMapper(Node):
             self._saved = True
             self._cmd(0.0, 0.0)
             self.get_logger().info(
-                f"Mapping complete ({self.duration:.0f}s). Saving map to {self.map_path} ..."
+                f"Mapping complete ({self.duration:.0f}s). Saving map ..."
             )
             self._save_map()
             return
@@ -160,91 +163,76 @@ class AutoMapper(Node):
             self._cmd(0.0, 0.0)
             return
 
-        # ── forward ──────────────────────────────────────────
-        if self.state == "forward":
+        # ── drive ───────────────────────────────────────────────────────
+        if self.state == "drive":
             if self._obstacle_ahead():
                 self.get_logger().info(
-                    f"Obstacle ahead (front median {self._front_distance():.2f}m) -> backup"
+                    f"Obstacle (front median {self._front_median():.2f}m) -> backup"
                 )
                 self._set_state("backup")
-            else:
-                self._cmd(vx=self.fwd_speed, wz=0.0)
+                return
 
-        # ── backup ───────────────────────────────────────────
+            if state_elapsed >= self.drive_sec:
+                self._drive_cycles += 1
+                self._cmd(0.0, 0.0)
+                self._set_state("pause")
+                return
+
+            self._cmd(vx=self.fwd_speed, wz=0.0)
+
+        # ── pause ── settle before wiggle ────────────────────────────────
+        elif self.state == "pause":
+            self._cmd(0.0, 0.0)
+            if state_elapsed >= self.pause_sec:
+                self._set_state("wiggle_out")
+
+        # ── wiggle_out ── rotate +wiggle_deg ─────────────────────────────
+        elif self.state == "wiggle_out":
+            wz = self.wiggle_speed * self._wiggle_dir
+            if state_elapsed < self.wiggle_sec:
+                self._cmd(vx=0.0, wz=wz)
+            else:
+                self._set_state("wiggle_back")
+
+        # ── wiggle_back ── rotate back to original heading ───────────────
+        elif self.state == "wiggle_back":
+            wz = -self.wiggle_speed * self._wiggle_dir
+            if state_elapsed < self.wiggle_sec:
+                self._cmd(vx=0.0, wz=wz)
+            else:
+                self._cmd(0.0, 0.0)
+                self._wiggle_dir *= -1.0  # alternate wiggle direction each cycle
+
+                # Every N drive cycles, make a larger heading change
+                if self._drive_cycles % self.cycles_before_turn == 0:
+                    self._set_state("turn")
+                else:
+                    self._set_state("drive")
+
+        # ── turn ── larger heading change for coverage ───────────────────
+        elif self.state == "turn":
+            wz = self.turn_speed * self._turn_dir
+            if state_elapsed < self.turn_sec:
+                self._cmd(vx=0.0, wz=wz)
+            else:
+                self._cmd(0.0, 0.0)
+                self._turn_dir *= -1.0  # alternate turn direction
+                self.get_logger().info("Heading change complete -> drive")
+                self._set_state("drive")
+
+        # ── backup ──────────────────────────────────────────────────────
         elif self.state == "backup":
             if state_elapsed < self.backup_sec:
                 self._cmd(vx=-self.backup_speed, wz=0.0)
             else:
-                self.follow_side *= -1.0
-                self._set_state("turn_to_acquire_wall")
-
-        # ── turn_to_acquire_wall ─────────────────────────────
-        elif self.state == "turn_to_acquire_wall":
-            side_dist  = self._side_distance(self.follow_side)
-            front_dist = self._front_distance()
-
-            if math.isfinite(side_dist) and side_dist < self.wall_detect_dist and front_dist > self.obs_dist:
-                self.get_logger().info(
-                    f"Wall acquired on {'left' if self.follow_side > 0 else 'right'} "
-                    f"(side={side_dist:.2f}m, front={front_dist:.2f}m)"
-                )
-                self._set_state("wall_follow")
-            else:
-                wz = self.turn_speed if self.follow_side > 0 else -self.turn_speed
-                self._cmd(vx=0.0, wz=wz)
-                if state_elapsed > 6.0:
-                    self.get_logger().warn(
-                        f"Could not acquire wall (side={side_dist:.2f}m limit={self.wall_detect_dist:.1f}m "
-                        f"front={front_dist:.2f}m) -> forward"
-                    )
-                    self._set_state("forward")
-
-        # ── wall_follow ──────────────────────────────────────
-        elif self.state == "wall_follow":
-            front_dist = self._front_distance()
-            side_dist  = self._side_distance(self.follow_side)
-
-            if self._obstacle_ahead():
-                self.get_logger().info(
-                    f"Wall-follow front blocked (front={front_dist:.2f}m) -> backup"
-                )
-                self._set_state("backup")
-                return
-
-            if state_elapsed >= self.wall_follow_sec:
-                self.get_logger().info(
-                    f"Wall-follow segment done -> sweep {self.sweep_deg:.0f}deg away from wall"
-                )
-                self._set_state("sweep")
-                return
-
-            if not math.isfinite(side_dist):
-                wz = 0.18 if self.follow_side > 0 else -0.18
-                self._cmd(vx=self.wall_speed * 0.7, wz=wz)
-                return
-
-            error = side_dist - self.wall_target
-            wz    = self.wall_kp * error * (1.0 if self.follow_side > 0 else -1.0)
-            wz    = max(-self.max_turn_speed, min(self.max_turn_speed, wz))
-            speed_scale = 1.0 - min(abs(wz) / max(self.max_turn_speed, 1e-6), 0.6)
-            self._cmd(vx=self.wall_speed * speed_scale, wz=wz)
-
-        # ── sweep ────────────────────────────────────────────
-        # Turn away from the wall (into the room) by sweep_deg.
-        # This changes Spot's heading so the next forward segment crosses
-        # the room diagonally, giving slam_toolbox new geometry to match.
-        elif self.state == "sweep":
-            if state_elapsed < self.sweep_sec:
-                # Turn AWAY from follow_side (into the room)
-                wz = -self.turn_speed if self.follow_side > 0 else self.turn_speed
-                self._cmd(vx=0.0, wz=wz)
-            else:
-                self.get_logger().info("Sweep complete -> forward")
-                self._set_state("forward")
+                self._cmd(0.0, 0.0)
+                self._set_state("turn")
 
         else:
             self.get_logger().warn(f"Unknown state {self.state}, stopping.")
             self._cmd(0.0, 0.0)
+
+    # ------------------------------------------------------------------ #
 
     def _save_map(self):
         try:
@@ -264,7 +252,8 @@ class AutoMapper(Node):
 
         try:
             result = subprocess.run(
-                ["ros2", "run", "nav2_map_server", "map_saver_cli", "-f", self.map_path],
+                ["ros2", "run", "nav2_map_server", "map_saver_cli",
+                 "-f", self.map_path],
                 capture_output=True, text=True, timeout=20,
             )
             if result.returncode == 0:
@@ -285,7 +274,7 @@ def main():
         rclpy.spin(node)
     except KeyboardInterrupt:
         node._cmd(0.0, 0.0)
-        node.get_logger().info("Interrupted -- stopping Spot.")
+        node.get_logger().info("Interrupted.")
     node.destroy_node()
 
 

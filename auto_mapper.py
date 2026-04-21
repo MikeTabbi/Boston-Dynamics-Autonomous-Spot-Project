@@ -216,7 +216,6 @@ class AutoMapper(Node):
                 self._cmd(vx=0.0, wz=wz)
             else:
                 self._cmd(0.0, 0.0)
-                self._turn_dir *= -1.0  # alternate turn direction
                 self.get_logger().info("Heading change complete -> drive")
                 self._set_state("drive")
 

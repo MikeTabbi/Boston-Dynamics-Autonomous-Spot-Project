@@ -76,7 +76,7 @@ class ScanMerger(Node):
         # Latest scans by topic
         # -----------------------------
         self.scans: Dict[str, LaserScan] = {}
-        self.topics = ["/scan_fl", "/scan_fr"]
+        self.topics = ["/scan_fl", "/scan_fr", "/scan_left"]
 
         for topic in self.topics:
             self.create_subscription(

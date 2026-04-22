@@ -2,107 +2,108 @@
 # ============================================================
 # Spot Autonomous Exploration - Launch Commands
 # ============================================================
-# TWO-PHASE WORKFLOW:
+# ARCHITECTURE: RTAB-Map RGB-D Visual SLAM
 #
-#   PHASE 1 — BUILD MAP
-#     Terminals: 1, 2, 3-MAP, 5, 6-MAP
-#     auto_mapper drives Spot and saves map when done.
-#     Stop Terminals 3-MAP and 6-MAP after map saves.
+#   PHASE 1 — BUILD MAP (RTAB-Map mapping mode)
+#     Terminals: 1, 2, 3, 4-MAP
+#     Drive Spot manually (or use auto_mapper) to explore.
+#     Save map when done via Terminal 4-MAP command.
 #
-#   PHASE 2 — EXPLORE
-#     Terminals: 1, 2, 3-LOC, 4, 5, 6A (probe) then 6B (frontier)
+#   PHASE 2 — NAVIGATE (RTAB-Map localization + Nav2)
+#     Terminals: 1, 2, 3, 4-LOC, 5, 6A (probe) then 6B (frontier)
 #
-# Start each terminal in order. Wait ~5s between terminals.
+# Start each terminal in order. Wait ~10s between terminals.
 # Credentials and cmd_duration are set via /root/spot_config.yaml.
 # ============================================================
 
 
 # ── TERMINAL 1 ── Spot Driver ──────────────────────────────
 docker start -i spot_nav
-
-source ~/.bashrc
+# (inside container — already sourced in .bashrc)
 ros2 launch spot_driver spot_driver.launch.py spot_name:=spot config_file:=/root/spot_config.yaml
 
 
-# ── TERMINAL 2 ── Single Front Camera ──────────────────────
-# frontleft depth -> /scan directly. No scan merger.
-# output_frame:=spot/body ensures angle=0 = robot forward.
-# range_min:=0.85 filters Spot's front-left leg (~0.81m in body frame).
-# Use in BOTH phases — identical command each time.
+# ── TERMINAL 2 ── TF Keep-Alive ────────────────────────────
+# Keeps spot/frontleft->spot/frontleft_fisheye TF fresh.
+# The Spot driver's register_node loses this TF after startup
+# because Spot's hardware clock is ahead of the container clock.
+# This script tracks Spot's clock via depth images and republishes
+# the TF at Spot's clock rate so depth_registered never drops.
+# REQUIRED — start before RTAB-Map.
 docker exec -it spot_nav bash
 
-source ~/.bashrc
-ros2 run depthimage_to_laserscan depthimage_to_laserscan_node --ros-args -r depth:=/spot/depth/frontleft/image -r depth_camera_info:=/spot/depth/frontleft/camera_info -r scan:=/scan -p range_min:=0.85 -p range_max:=10.0 -p scan_height:=10 -p output_frame:=spot/body
+python3 /root/tf_keep_alive.py
 
 
-# ── TERMINAL 3-MAP ── SLAM Toolbox (MAPPING mode) ──────────
-# PHASE 1 ONLY. Builds map live while auto_mapper drives.
-# Stop this terminal after Terminal 6-MAP saves the map.
+# ── TERMINAL 3 ── RTAB-Map (PHASE 1 — Mapping) ─────────────
+# Visual SLAM using frontleft RGB-D camera + wheel odometry.
+# visual_odometry:=false — uses /spot/odometry (wheel odom) for pose.
+# approx_sync:=true — needed because RGB (~2.8 Hz) and depth (~2.3 Hz)
+# publish at different rates.
+# Watch for "Loop closure detected!" lines — confirms map quality.
+# Node count in output should climb steadily (1 Hz rate).
 docker exec -it spot_nav bash
 
-source ~/.bashrc
-ros2 launch slam_toolbox online_async_launch.py slam_params_file:=/root/slam_params.yaml
+# NEW MAP (clears existing map):
+ros2 launch rtabmap_launch rtabmap.launch.py rgb_topic:=/spot/camera/frontleft/image depth_topic:=/spot/depth_registered/frontleft/image camera_info_topic:=/spot/camera/frontleft/camera_info frame_id:=spot/frontleft_fisheye base_frame_id:=spot/body odom_frame_id:=spot/odom odom_topic:=/spot/odometry visual_odometry:=false approx_sync:=true approx_sync_max_interval:=1.0 subscribe_depth:=true subscribe_rgb:=true rviz:=false rtabmap_args:="--delete_db_on_start --Vis/MinInliers 6 --RGBD/LocalLoopDetectionMaxDiff 2.0 --RGBD/OptimizeMaxError 4.0"
+
+# CONTINUE existing map (loads saved rtabmap.db):
+ros2 launch rtabmap_launch rtabmap.launch.py rgb_topic:=/spot/camera/frontleft/image depth_topic:=/spot/depth_registered/frontleft/image camera_info_topic:=/spot/camera/frontleft/camera_info frame_id:=spot/frontleft_fisheye base_frame_id:=spot/body odom_frame_id:=spot/odom odom_topic:=/spot/odometry visual_odometry:=false approx_sync:=true approx_sync_max_interval:=1.0 subscribe_depth:=true subscribe_rgb:=true rviz:=false rtabmap_args:="--Vis/MinInliers 6 --RGBD/LocalLoopDetectionMaxDiff 2.0 --RGBD/OptimizeMaxError 4.0"
+
+# Save map when done:
+# ros2 service call /rtabmap/rtabmap/backup std_srvs/srv/Empty {}
+# Copy map to host:
+# docker cp spot_nav:/root/.ros/rtabmap.db /Users/temp/Desktop/spot_nav_repo/rtabmap.db
 
 
-# ── TERMINAL 5 ── cmd_vel Relay ────────────────────────────
-# REQUIRED in both phases.
+# ── FOXGLOVE BRIDGE (live visualization) ───────────────────
+# Run in a spare terminal. Then open Foxglove Studio and connect to ws://localhost:8765
+# 3D panel: Display frame=map, enable /rtabmap/cloud_map, /rtabmap/cloud_obstacles, /rtabmap/map
+# Image panel: /spot/camera/frontleft/image
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml
+
+
+# ── TERMINAL 4-MAP ── Drive Spot (PHASE 1) ─────────────────
+# Option A — autonomous mapping:
 docker exec -it spot_nav bash
 
-source ~/.bashrc
+python3 -u /root/auto_mapper.py --ros-args -p duration_sec:=600.0 -p forward_speed:=0.10 -p drive_sec:=2.5 -p pause_sec:=1.0 -p wiggle_deg:=15.0 -p wiggle_speed:=0.20 -p cycles_before_turn:=3 -p turn_deg:=90.0 -p obstacle_distance:=0.75 -p forward_cone_deg:=20.0 -p min_obstacle_hits:=5 -p backup_sec:=2.0
+
+# Option B — manual drive with cmd_vel relay:
+# ros2 run topic_tools relay /cmd_vel /spot/cmd_vel
+# (then use Spot controller or teleop_twist_keyboard)
+
+
+# ── TERMINAL 3 ── RTAB-Map (PHASE 2 — Localization) ────────
+# REPLACE the mapping command with localization mode.
+# Loads the saved rtabmap.db, localizes without rebuilding map.
+docker exec -it spot_nav bash
+
+ros2 launch rtabmap_launch rtabmap.launch.py rgb_topic:=/spot/camera/frontleft/image depth_topic:=/spot/depth_registered/frontleft/image camera_info_topic:=/spot/camera/frontleft/camera_info frame_id:=spot/frontleft_fisheye base_frame_id:=spot/body odom_frame_id:=spot/odom odom_topic:=/spot/odometry visual_odometry:=false approx_sync:=true approx_sync_max_interval:=1.0 subscribe_depth:=true subscribe_rgb:=true rviz:=false localization:=true
+
+
+# ── TERMINAL 5 ── cmd_vel Relay (PHASE 2) ──────────────────
+# REQUIRED for Nav2 to send velocity commands to Spot.
+docker exec -it spot_nav bash
+
 ros2 run topic_tools relay /cmd_vel /spot/cmd_vel
 
 
-# ── TERMINAL 6-MAP ── Autonomous Mapper (PHASE 1) ──────────
-# Drives Spot to build the map. No Nav2 required.
-# Motion strategy: drive-pause-wiggle
-#   drive 2.5s -> stop 1.0s -> wiggle ±15deg -> every 3 cycles: turn 90deg -> repeat
-#   obstacle: backup 2s -> turn 90deg -> continue
-# Map saves automatically: /root/my_map.pgm + .yaml + .posegraph
+# ── TERMINAL 6 ── Nav2 (PHASE 2) ───────────────────────────
+# RTAB-Map provides map->odom TF. Nav2 uses /rtabmap/map as grid.
 docker exec -it spot_nav bash
 
-source ~/.bashrc
-python3 -u /root/auto_mapper.py --ros-args -p duration_sec:=600.0 -p forward_speed:=0.10 -p drive_sec:=2.5 -p pause_sec:=1.0 -p wiggle_deg:=15.0 -p wiggle_speed:=0.20 -p cycles_before_turn:=3 -p turn_deg:=90.0 -p obstacle_distance:=0.75 -p forward_cone_deg:=20.0 -p min_obstacle_hits:=5 -p backup_sec:=2.0 -p map_save_path:=/root/my_map
-# After this exits: stop Terminal 3-MAP, inspect map, then start Phase 2.
-
-# Copy map to Desktop to inspect:
-# docker cp spot_nav:/root/my_map.pgm /Users/temp/Desktop/my_map.pgm
-
-
-# ── TERMINAL 3-LOC ── SLAM Toolbox (LOCALIZATION mode) ─────
-# PHASE 2 ONLY. Use instead of Terminal 3-MAP.
-# Loads /root/my_map.posegraph saved by auto_mapper.
-# Localizes on the fixed map — does NOT rebuild it.
-# Provides map->odom TF to Nav2.
-docker exec -it spot_nav bash
-
-source ~/.bashrc
-ros2 launch slam_toolbox localization_launch.py slam_params_file:=/root/slam_params_localization.yaml
-
-
-# ── TERMINAL 4 ── Nav2 (PHASE 2 only) ──────────────────────
-# navigation_launch.py only — no map server, no AMCL.
-# slam_toolbox (Terminal 3-LOC) provides map->odom TF.
-# Do NOT use bringup_launch.py.
-docker exec -it spot_nav bash
-
-source ~/.bashrc
 ros2 launch nav2_bringup navigation_launch.py params_file:=/root/nav2_params.yaml use_sim_time:=false
 
 
-# ── TERMINAL 6A ── Waypoint Probe (PHASE 2 — run first) ────
-# Edit WAYPOINTS in /root/waypoint_probe.py before running.
-# Use RViz 2D Pose Estimate to read map-frame coordinates.
-# Run this before 6B — it proves Nav2 + localization work.
+# ── TERMINAL 7A ── Waypoint Probe (run first in Phase 2) ───
 docker exec -it spot_nav bash
 
-source ~/.bashrc
 python3 -u /root/waypoint_probe.py
 
 
-# ── TERMINAL 6B ── Frontier Explorer (after probe passes) ──
-# Only switch to this once waypoint_probe.py passes all goals cleanly.
+# ── TERMINAL 7B ── Frontier Explorer (after probe passes) ──
 # docker exec -it spot_nav bash
-# source ~/.bashrc
 # python3 -u /root/frontier_explore_hybrid.py --ros-args \
 #   -p min_frontier_cluster:=8 \
 #   -p goal_clearance_cells:=6 \
@@ -110,54 +111,74 @@ python3 -u /root/waypoint_probe.py
 #   -p cost_threshold:=120
 
 
-# ── VERIFY + CLEAR (spare terminal) ────────────────────────
+# ── FOXGLOVE VISUALIZATION ──────────────────────────────────
+# Connect Foxglove Studio to ws://localhost:8765
+# 3D panel settings:
+#   Display frame: map
+#   Topics to enable:
+#     /rtabmap/cloud_map      — full 3D point cloud
+#     /rtabmap/cloud_obstacles — obstacles only
+#     /rtabmap/map            — 2D occupancy grid
+# Image panel:
+#   Topic: /spot/camera/frontleft/image
+
+
+# ── VERIFY (spare terminal) ─────────────────────────────────
 # docker exec -it spot_nav bash
-# source ~/.bashrc
-#
+
+# RTAB-Map receiving data (node count should climb at ~1 Hz)
+# ros2 topic echo /rtabmap/info --field nodes_count
+
+# Depth_registered publishing (must be >0 Hz)
+# ros2 topic hz /spot/depth_registered/frontleft/image
+
 # TF chain intact (must show: map -> spot/odom -> spot/body)
 # ros2 run tf2_tools view_frames
-#
-# Scan arriving (~4 Hz)
-# ros2 topic hz /scan
-#
-# Map publishing
-# ros2 topic hz /map
-#
+
+# Wheel odometry publishing
+# ros2 topic hz /spot/odometry
+
 # Nav2 ready (Phase 2)
 # ros2 action list
-#
-# Clear costmaps if goal aborts (status=6)
-# ros2 service call /global_costmap/clear_entirely_global_costmap nav2_msgs/srv/ClearEntireCostmap {}
-# ros2 service call /local_costmap/clear_entirely_local_costmap nav2_msgs/srv/ClearEntireCostmap {}
-#
-# Relay working
-# ros2 topic hz /spot/cmd_vel
 
 
+# ============================================================
+# KEY FILES (inside container at /root/)
+# ============================================================
+# tf_keep_alive.py    — keeps frontleft->fisheye TF fresh (Spot clock fix)
+# auto_mapper.py      — autonomous drive-pause-wiggle mapper
+# waypoint_probe.py   — Nav2 validation (2 waypoints)
+# nav2_params.yaml    — Nav2 config (allow_unknown:true, controller 5Hz)
+# spot_config.yaml    — Spot credentials + cmd_duration:=5.0 (clock fix)
+#
+# HOST FILES
+# /Users/temp/Desktop/spot_nav_repo/ — all project files, synced to GitHub
+# /tmp/tf_keep_alive.py              — source (docker cp to container)
+#
 # ============================================================
 # NOTES
 # ============================================================
-# Clock sync:
-#   Container clock is ~130s ahead of Spot. cmd_duration:=5.0 in
-#   /root/spot_config.yaml gives commands a 5s validity window.
-#   Do NOT pass cmd_duration as a launch arg — must be in config_file.
+# Clock offset:
+#   Spot's hardware clock is ~130s ahead of the container clock.
+#   cmd_duration:=5.0 in spot_config.yaml gives commands a 5s validity.
+#   tf_keep_alive.py tracks Spot's clock from depth image timestamps
+#   and republishes camera TF at Spot's clock rate to prevent expiry.
 #
-# Single camera:
-#   Scan merger abandoned — both front cameras point forward, giving no
-#   side coverage. Wall detection at side_angle_deg=35 needs range_min=0.85
-#   to filter the leg (~0.81m). obstacle_distance=0.75 is below 0.85 range
-#   so obstacle detection uses the filtered scan correctly.
+# Why RTAB-Map (not slam_toolbox):
+#   slam_toolbox failed due to "hallway problem" — plain walls are
+#   featureless in 2D lidar. RTAB-Map uses visual bag-of-words loop
+#   closure on RGB images, which works on textured environments.
+#   The Agilent Hub has brick walls and equipment — ideal for visual SLAM.
 #
-# Phase 1 tips:
-#   Start Spot in the middle of the room, floor clear.
-#   Keep E-Stop handy. duration_sec=600 = 10 min.
-#   auto_mapper sweeps 75deg away from wall after each 8s segment —
-#   sends Spot diagonally across room for loop closure opportunities.
-#   Map saves automatically — inspect .pgm before starting Phase 2.
+# Camera setup:
+#   frontleft camera only: RGB 640x480 ~2.8Hz, depth_registered ~2.3Hz
+#   depth_registered requires register_node_frontleft (in spot driver)
+#   which needs TF spot/frontleft->spot/frontleft_fisheye
+#   tf_keep_alive.py prevents this TF from expiring.
 #
-# Phase 2 tips:
-#   slam_toolbox LOCALIZATION mode uses .posegraph (not .pgm).
-#   Use navigation_launch.py only — not bringup_launch.py.
-#   Run waypoint probe first. Clear costmaps if goal aborts (status=6).
-#   Only switch to frontier explorer after probe passes cleanly.
+# RTAB-Map mapping tips:
+#   Move slowly (<0.5 m/s). Loop closures need revisiting seen areas.
+#   Watch terminal for "Loop closure detected!" lines.
+#   WM=1 is normal when stationary — grows as robot moves.
+#   --delete_db_on_start clears old map each run (remove for Phase 2).
 # ============================================================

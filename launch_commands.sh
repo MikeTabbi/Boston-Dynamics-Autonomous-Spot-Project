@@ -64,10 +64,12 @@ ros2 launch foxglove_bridge foxglove_bridge_launch.xml
 
 
 # ── TERMINAL 4-MAP ── Drive Spot (PHASE 1) ─────────────────
-# Option A — autonomous mapping:
+# Start Spot from a CORNER of the room, facing along the 12.8 m wall (clockwise).
+# Middle-of-room start = poor loop closure. Corner start = best loop closure.
 docker exec -it spot_nav bash
 
-python3 -u /root/auto_mapper.py --ros-args -p duration_sec:=600.0 -p forward_speed:=0.10 -p drive_sec:=2.5 -p pause_sec:=1.0 -p wiggle_deg:=15.0 -p wiggle_speed:=0.20 -p cycles_before_turn:=3 -p turn_deg:=90.0 -p obstacle_distance:=0.75 -p forward_cone_deg:=20.0 -p min_obstacle_hits:=5 -p backup_sec:=2.0
+# Option A — autonomous mapper (structured segments + revisits for loop closure):
+python3 -u /root/autonomous_mapper.py --ros-args -p max_duration_sec:=600.0 -p segment_distance:=1.0 -p forward_speed:=0.15 -p pause_duration:=2.5 -p observe_angle_deg:=35.0 -p revisit_interval:=6 -p min_nodes_for_quality:=60 -p min_loop_closures:=1
 
 # Option B — manual drive with cmd_vel relay:
 # ros2 run topic_tools relay /cmd_vel /spot/cmd_vel

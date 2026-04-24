@@ -5,3 +5,4 @@ spot_config.yaml
 __pycache__/
 *.pyc
 debug_capture/
+rtabmap.db

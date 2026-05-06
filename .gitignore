@@ -2,7 +2,8 @@ spot_config.yaml
 *.pgm
 *.posegraph
 *.data
+*.db
 __pycache__/
 *.pyc
 debug_capture/
-rtabmap.db
+spot_maps/

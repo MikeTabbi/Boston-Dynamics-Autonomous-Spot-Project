@@ -9,6 +9,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.msg import Costmap
 from geometry_msgs.msg import PoseStamped
@@ -38,7 +39,7 @@ class HybridFrontierExplorer(Node):
         self.declare_parameter('max_goal_distance', 3.5)
 
         self.declare_parameter('cost_threshold', 50)
-        self.declare_parameter('reject_unknown_costmap', False)
+        self.declare_parameter('reject_unknown_costmap', True)
 
         # Debug / behavior toggles
         self.declare_parameter('enable_initial_spin', False)   # disabled for debugging
@@ -69,7 +70,12 @@ class HybridFrontierExplorer(Node):
         self.cm_msg: Costmap | None = None
 
         # --- Subscribers ---
-        self.create_subscription(OccupancyGrid, self.map_topic, self.on_map, 10)
+        map_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.create_subscription(OccupancyGrid, self.map_topic, self.on_map, map_qos)
         self.create_subscription(Costmap, self.costmap_topic, self.on_costmap, 10)
 
         # --- TF ---
@@ -342,7 +348,7 @@ class HybridFrontierExplorer(Node):
             if cval >= self.cost_thresh and cval != 255:
                 continue
 
-            score = 0.6 * (dist / self.max_goal_dist) + 0.4 * min(len(cluster) / 200.0, 1.0)
+            score = 0.3 * (dist / self.max_goal_dist) + 0.7 * min(len(cluster) / 200.0, 1.0)
             if score > best_score:
                 best_score = score
                 best = (gx, gy)
@@ -357,6 +363,7 @@ class HybridFrontierExplorer(Node):
         goal = NavigateToPose.Goal()
         ps = PoseStamped()
         ps.header.frame_id = self.global_frame
+        ps.header.stamp = self.get_clock().now().to_msg()
         ps.pose.position.x = float(gx)
         ps.pose.position.y = float(gy)
         ps.pose.position.z = 0.0
@@ -435,10 +442,11 @@ class HybridFrontierExplorer(Node):
             gx, gy = self.last_goal
             key = (round(gx, 2), round(gy, 2))
 
-            if status in (4, 5, 6):
-                self.get_logger().warn(f"Goal {key} failed with status {status}, but not blacklisting in debug mode")
-            else:
+            if status == 4:
                 self.get_logger().info(f"Goal {key} completed successfully")
+            else:
+                self.get_logger().warn(f"Goal {key} failed with status {status} — blacklisting")
+                self.blacklist.add(key)
 
         self._clear_costmaps()
         self.goal_in_flight = False

@@ -7,8 +7,8 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 
 WAYPOINTS = [
-    (2.2,  2.4,   0.0),
-    (1.7,  2.4,   0.0),
+    (1.6,  0.8,   0.0),
+    (1.284, 0.756, 0.0),
 ]
 
 def yaw_to_quat(yaw_deg):
@@ -43,6 +43,7 @@ class WaypointProbe(Node):
         goal = NavigateToPose.Goal()
         ps = PoseStamped()
         ps.header.frame_id = "map"
+        ps.header.stamp = self.get_clock().now().to_msg()
         ps.pose.position.x = float(x)
         ps.pose.position.y = float(y)
         ps.pose.position.z = 0.0
